@@ -1,6 +1,0 @@
-@JwtCreatorWebApi_HostAddress = http://localhost:5007
-
-GET {{JwtCreatorWebApi_HostAddress}}/weatherforecast/
-Accept: application/json
-
-###

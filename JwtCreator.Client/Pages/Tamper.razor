@@ -1,0 +1,225 @@
+﻿@page "/tamper"
+@layout MainLayout
+@using System.Text
+@using System.Text.Json
+@using System.Text.Json.Nodes
+@using Microsoft.IdentityModel.Tokens
+@using System.IdentityModel.Tokens.Jwt
+@inject TamperState TamperState
+@using System.Security.Claims
+@inject IJSRuntime JS
+@inject NavigationManager Nav
+
+<PageTitle>Tamper — JWT Studio</PageTitle>
+
+<div class="pane-header">
+    <span class="pane-cmd">Tamper Token</span>
+    <span class="pane-desc">Edit the payload and re-sign</span>
+</div>
+
+<div class="step-row">
+    <span class="step-pill">1</span>
+    <span class="step-text">Paste a token to decode</span>
+</div>
+<div class="field span2" style="margin-bottom:.75rem">
+    <textarea class="field-input field-textarea" @bind="tampToken" placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." rows="4"></textarea>
+</div>
+<button class="ghost-btn" @onclick="TamperLoad">Load &amp; Decode</button>
+
+@if (!string.IsNullOrEmpty(tampLoadError))
+{
+    <div class="err-line"><span class="err-prefix">Error:</span> @tampLoadError</div>
+}
+
+@if (tampPayloadLoaded)
+{
+    <div class="rule"></div>
+
+    <div class="step-row">
+        <span class="step-pill">2</span>
+        <span class="step-text">Edit the payload JSON</span>
+    </div>
+    <textarea class="field-input field-textarea code-area" @bind="tampPayloadJson" rows="14" spellcheck="false"></textarea>
+
+    @if (!string.IsNullOrEmpty(tampJsonError))
+    {
+        <div class="err-line"><span class="err-prefix">Error:</span> @tampJsonError</div>
+    }
+
+    <div class="rule"></div>
+
+    <div class="step-row">
+        <span class="step-pill">3</span>
+        <span class="step-text">Sign with a secret key</span>
+    </div>
+    <div class="field" style="margin-bottom:1rem">
+        <label class="field-label">Secret Key <span class="muted">— HMAC-SHA256</span></label>
+        <input class="field-input secret" @bind="tampSecretKey" placeholder="Min. 16 characters"  />
+    </div>
+    <button class="run-btn" @onclick="TamperResign">Re-sign &amp; Build</button>
+
+    @if (!string.IsNullOrEmpty(tampResignError))
+    {
+        <div class="err-line"><span class="err-prefix">Error:</span> @tampResignError</div>
+    }
+
+    @if (!string.IsNullOrEmpty(tampOutputToken))
+    {
+        <div class="output-block">
+            <div class="output-header">
+                <span class="output-label">New Token</span>
+                @if (tampNewExp != default)
+                {
+                    <span class="output-meta">Expires @tampNewExp.ToString("yyyy-MM-dd HH:mm") UTC</span>
+                }
+            </div>
+            <div class="token-line">
+                <span class="t-red">@tampOutHeader</span><span class="t-dim">.</span><span class="t-amber">@tampOutPayload</span><span class="t-dim">.</span><span class="t-green">@tampOutSignature</span>
+            </div>
+            <div class="output-footer">
+                <button class="copy-btn" @onclick="CopyToken">
+                    @(tampCopied ? "✓ Copied" : "Copy token")
+                </button>
+                <button class="copy-btn" @onclick="SendToDecoder">Send to Decoder →</button>
+
+            </div>
+        </div>
+        <div class="field mt-3">
+            <label>Navigate To With The Token</label>
+             <input class="field-input" @bind="tampOutUrl" placeholder="WWW.google.com"/>
+        </div>
+     <button class="run-btn mt-3" @onclick="TamperNavigate">Navigate</button>
+    }
+}
+
+@code {
+    private string tampToken = "";
+    private string tampPayloadJson = "";
+    private string tampSecretKey = "";
+    private string tampLoadError = "";
+    private string tampJsonError = "";
+    private string tampResignError = "";
+    private string tampOutputToken = "";
+    private string tampOutHeader = "", tampOutPayload = "", tampOutSignature = "";
+    private DateTime tampNewExp;
+    private bool tampPayloadLoaded = false;
+    private bool tampCopied = false;
+    private string tampOutUrl = "";
+    private void TamperLoad()
+    {
+        tampLoadError = ""; tampPayloadLoaded = false; tampOutputToken = "";
+        tampJsonError = ""; tampResignError = "";
+        var raw = tampToken.Trim();
+        if (string.IsNullOrWhiteSpace(raw)) { tampLoadError = "Paste a JWT token first."; return; }
+        var parts = raw.Split('.');
+        if (parts.Length != 3) { tampLoadError = "Invalid JWT — expected 3 dot-separated parts."; return; }
+        try
+        {
+            string padded = parts[1];
+            while (padded.Length % 4 != 0) padded += "=";
+            var payloadBytes = Convert.FromBase64String(padded.Replace('-', '+').Replace('_', '/'));
+            var payloadJson = Encoding.UTF8.GetString(payloadBytes);
+            var node = JsonNode.Parse(payloadJson);
+            tampPayloadJson = node!.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+            tampPayloadLoaded = true;
+        }
+        catch (Exception ex) { tampLoadError = $"Could not decode token: {ex.Message}"; }
+    }
+
+    private void TamperResign()
+    {
+        tampJsonError = ""; tampResignError = ""; tampOutputToken = "";
+        if (string.IsNullOrWhiteSpace(tampSecretKey) || tampSecretKey.Length < 16)
+        {
+            tampResignError = "Secret key must be at least 16 characters."; return;
+        }
+
+        JsonNode? payloadNode;
+        try { payloadNode = JsonNode.Parse(tampPayloadJson); }
+        catch (Exception ex) { tampJsonError = $"Invalid JSON: {ex.Message}"; return; }
+
+        if (payloadNode is not JsonObject payloadObj)
+        {
+            tampJsonError = "Payload must be a JSON object { ... }"; return;
+        }
+
+        try
+        {
+            var claims = new List<Claim>();
+            DateTime? nbf = null, exp = null;
+            string? iss = null, aud = null;
+
+            foreach (var kv in payloadObj)
+            {
+                var k = kv.Key; var v = kv.Value;
+                if (v == null) continue;
+                switch (k)
+                {
+                    case "iss": iss = v.ToString(); break;
+                    case "aud": aud = v.ToString(); break;
+                    case "exp":
+                        if (long.TryParse(v.ToString(), out var expSec))
+                            exp = DateTimeOffset.FromUnixTimeSeconds(expSec).UtcDateTime;
+                        break;
+                    case "nbf":
+                        if (long.TryParse(v.ToString(), out var nbfSec))
+                            nbf = DateTimeOffset.FromUnixTimeSeconds(nbfSec).UtcDateTime;
+                        break;
+                    case "iat": break;
+                    default:
+                        if (v is JsonArray arr)
+                            foreach (var item in arr)
+                                claims.Add(new Claim(k, item?.ToString() ?? ""));
+                        else
+                            claims.Add(new Claim(k, v.ToString()));
+                        break;
+                }
+            }
+
+            var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(tampSecretKey));
+            var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+            var now = DateTime.UtcNow;
+            var jwt = new JwtSecurityToken(issuer: iss, audience: aud, claims: claims,
+                notBefore: nbf ?? now, expires: exp ?? now.AddDays(365), signingCredentials: creds);
+
+            tampOutputToken = new JwtSecurityTokenHandler().WriteToken(jwt);
+            var p = tampOutputToken.Split('.');
+            tampOutHeader = p[0]; tampOutPayload = p[1]; tampOutSignature = p[2];
+            tampNewExp = exp ?? now.AddDays(365);
+        }
+        catch (Exception ex) { tampResignError = $"Failed to sign: {ex.Message}"; }
+    }
+
+    private async Task CopyToken()
+    {
+        await JS.InvokeVoidAsync("navigator.clipboard.writeText", tampOutputToken);
+        tampCopied = true; StateHasChanged();
+        await Task.Delay(2000);
+        tampCopied = false;
+    }
+
+    private void SendToDecoder()
+    {
+        TamperState.Token = tampOutputToken;
+        TamperState.Secret = tampSecretKey;
+        Nav.NavigateTo("/decode");
+    }
+private async Task TamperNavigate()
+{
+    if (string.IsNullOrWhiteSpace(tampOutUrl) || string.IsNullOrWhiteSpace(tampOutputToken))
+        return;
+
+    if (!tampOutUrl.StartsWith("http://") && !tampOutUrl.StartsWith("https://"))
+        tampOutUrl = "https://" + tampOutUrl;
+
+    var finalUrl = $"{tampOutUrl}{Uri.EscapeDataString(tampOutputToken)}";
+
+    try
+    {
+        await JS.InvokeVoidAsync("window.open", finalUrl, "_blank");
+    }
+    catch
+    {
+    }
+}
+}

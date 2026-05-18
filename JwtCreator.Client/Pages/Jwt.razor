@@ -1,0 +1,134 @@
+﻿@page "/"
+@layout MainLayout
+@using System.Text
+@using Microsoft.IdentityModel.Tokens
+@using System.IdentityModel.Tokens.Jwt
+@using System.Security.Claims
+@inject IJSRuntime JS
+@inject TamperState TamperState
+
+<PageTitle>Generate — JWT Studio</PageTitle>
+
+<div class="pane-header">
+    <span class="pane-cmd">Generate Token</span>
+    <span class="pane-desc">Create a signed HS256 JWT</span>
+</div>
+
+<div class="field-grid">
+    <div class="field">
+        <label class="field-label">Name</label>
+        <input class="field-input" @bind="genName" placeholder="John Doe" />
+    </div>
+    <div class="field">
+        <label class="field-label">Employee Number</label>
+        <input class="field-input" @bind="genEmployeeNumber" placeholder="EMP-001" />
+    </div>
+    <div class="field span2">
+        <label class="field-label">Roles <span class="muted">— comma-separated</span></label>
+        <input class="field-input" @bind="genRoles" placeholder="Admin, Manager, Viewer" />
+    </div>
+    <div class="field">
+        <label class="field-label">Expires (days)</label>
+        <input class="field-input" type="number" @bind="genExpirationDays" min="1" />
+    </div>
+    <div class="field">
+        <label class="field-label">Issuer</label>
+        <input class="field-input" @bind="genIssuer" placeholder="your-app" />
+    </div>
+    <div class="field">
+        <label class="field-label">Audience</label>
+        <input class="field-input" @bind="genAudience" placeholder="your-audience" />
+    </div>
+    <div class="field span2">
+        <label class="field-label">Secret Key <span class="muted">— HMAC-SHA256</span></label>
+        <input class="field-input secret" @bind="genSecretKey" placeholder="Min. 16 characters" type="password" />
+    </div>
+</div>
+
+<button class="run-btn" @onclick="GenerateToken" disabled="@isGenerating">
+    @(isGenerating ? "Generating…" : "Generate Token")
+</button>
+
+@if (!string.IsNullOrEmpty(generateError))
+{
+    <div class="err-line"><span class="err-prefix">Error:</span> @generateError</div>
+}
+
+@if (!string.IsNullOrEmpty(generatedToken))
+{
+    <div class="output-block">
+        <div class="output-header">
+            <span class="output-label">Token</span>
+            <span class="output-meta">@issuedAt.ToString("yyyy-MM-dd HH:mm") UTC → @expiresAt.ToString("yyyy-MM-dd HH:mm") UTC</span>
+        </div>
+        <div class="token-line">
+            <span class="t-red">@tokenHeader</span><span class="t-dim">.</span><span class="t-amber">@tokenPayload</span><span class="t-dim">.</span><span class="t-green">@tokenSignature</span>
+        </div>
+        <div class="output-footer">
+            <button class="copy-btn" @onclick="CopyToken">
+                @(copied ? "✓ Copied" : "Copy token")
+            </button>
+        </div>
+    </div>
+}
+
+@code {
+    private string genName = "";
+    private string genEmployeeNumber = "";
+    private string genRoles = "";
+    private int genExpirationDays = 365;
+    private string genIssuer = "";
+    private string genAudience = "";
+    private string genSecretKey = "";
+    private string generatedToken = "";
+    private string generateError = "";
+    private string tokenHeader = "", tokenPayload = "", tokenSignature = "";
+    private DateTime issuedAt, expiresAt;
+    private bool isGenerating = false;
+    private bool copied = false;
+
+    private void GenerateToken()
+    {
+        generateError = ""; generatedToken = "";
+        if (string.IsNullOrWhiteSpace(genSecretKey) || genSecretKey.Length < 16) { generateError = "Secret key must be at least 16 characters."; return; }
+        if (string.IsNullOrWhiteSpace(genName)) { generateError = "Name is required."; return; }
+        if (string.IsNullOrWhiteSpace(genEmployeeNumber)) { generateError = "Employee Number is required."; return; }
+        try
+        {
+            isGenerating = true;
+            var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(genSecretKey));
+            var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+            var claims = new List<Claim>
+            {
+                new Claim("Name", genName),
+                new Claim("EN", genEmployeeNumber),
+                new Claim(JwtRegisteredClaimNames.Sub, genEmployeeNumber),
+                new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
+            };
+            if (!string.IsNullOrEmpty(genRoles))
+                foreach (var r in genRoles.Split(',', StringSplitOptions.RemoveEmptyEntries))
+                    claims.Add(new Claim(ClaimTypes.Role, r.Trim()));
+
+            issuedAt = DateTime.UtcNow;
+            expiresAt = issuedAt.AddDays(genExpirationDays);
+            var token = new JwtSecurityToken(
+                issuer: string.IsNullOrWhiteSpace(genIssuer) ? null : genIssuer,
+                audience: string.IsNullOrWhiteSpace(genAudience) ? null : genAudience,
+                claims: claims, notBefore: issuedAt, expires: expiresAt, signingCredentials: creds);
+
+            generatedToken = new JwtSecurityTokenHandler().WriteToken(token);
+            var p = generatedToken.Split('.');
+            tokenHeader = p[0]; tokenPayload = p[1]; tokenSignature = p[2];
+        }
+        catch (Exception ex) { generateError = ex.Message; }
+        finally { isGenerating = false; }
+    }
+
+    private async Task CopyToken()
+    {
+        await JS.InvokeVoidAsync("navigator.clipboard.writeText", generatedToken);
+        copied = true; StateHasChanged();
+        await Task.Delay(2000);
+        copied = false;
+    }
+}

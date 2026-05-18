@@ -1,0 +1,136 @@
+﻿@page "/decode"
+@layout MainLayout
+@using System.Text
+@using System.Text.Json
+@using Microsoft.IdentityModel.Tokens
+@using System.IdentityModel.Tokens.Jwt
+@inject JwtStudio.Services.TamperState TamperState
+
+<PageTitle>Decode — JWT Studio</PageTitle>
+
+<div class="pane-header">
+    <span class="pane-cmd">Decode Token</span>
+    <span class="pane-desc">Inspect and verify a JWT</span>
+</div>
+
+<div class="field span2" style="margin-bottom:1rem">
+    <label class="field-label">Token</label>
+    <textarea class="field-input field-textarea" @bind="decodeToken" placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." rows="4"></textarea>
+</div>
+<div class="field" style="margin-bottom:1.5rem">
+    <label class="field-label">Secret Key <span class="muted">— optional, for signature verification</span></label>
+    <input class="field-input secret" @bind="decodeSecretKey" placeholder="Leave empty to skip" type="password" />
+</div>
+
+<button class="run-btn" @onclick="DecodeToken">Decode Token</button>
+
+@if (!string.IsNullOrEmpty(decodeError))
+{
+    <div class="err-line"><span class="err-prefix">Error:</span> @decodeError</div>
+}
+
+@if (decodedHeader != null)
+{
+    <div class="output-block">
+        <div class="output-header">
+            <span class="output-label">Result</span>
+            <div class="badge-row">
+                @if (verificationStatus != null)
+                {
+                    <span class="badge @(isVerified ? "badge-ok" : "badge-err")">
+                        Signature @(isVerified ? "valid" : "invalid")
+                    </span>
+                }
+                @if (isExpired)
+                {
+                    <span class="badge badge-warn">Expired</span>
+                }
+                else
+                {
+                    <span class="badge badge-ok">Active</span>
+                }
+            </div>
+        </div>
+
+        <div class="section-row">
+            <span class="section-key t-red">Header</span>
+        </div>
+        <pre class="json-pre red-left">@decodedHeader</pre>
+
+        <div class="section-row">
+            <span class="section-key t-amber">Payload</span>
+        </div>
+        <pre class="json-pre amber-left">@decodedPayload</pre>
+
+        <div class="section-row">
+            <span class="section-key t-green">Signature</span>
+        </div>
+        <pre class="json-pre green-left">@decodedSignature</pre>
+    </div>
+}
+
+@code {
+    private string decodeToken = "";
+    private string decodeSecretKey = "";
+    private string? decodedHeader, decodedPayload, decodedSignature;
+    private string? verificationStatus;
+    private bool isVerified, isExpired;
+    private string decodeError = "";
+
+    protected override void OnInitialized()
+    {
+        var (token, secret) = TamperState.Consume();
+        if (token != null)
+        {
+            decodeToken = token;
+            decodeSecretKey = secret ?? "";
+            DecodeToken();
+        }
+    }
+
+    private void DecodeToken()
+    {
+        decodeError = "";
+        decodedHeader = decodedPayload = decodedSignature = verificationStatus = null;
+        isExpired = false;
+
+        if (string.IsNullOrWhiteSpace(decodeToken)) { decodeError = "Please paste a JWT token."; return; }
+        try
+        {
+            var handler = new JwtSecurityTokenHandler();
+            if (!handler.CanReadToken(decodeToken.Trim())) { decodeError = "Invalid JWT format."; return; }
+            var jwt = handler.ReadJwtToken(decodeToken.Trim());
+
+            decodedHeader = JsonSerializer.Serialize(
+                jwt.Header.ToDictionary(k => k.Key, v => v.Value),
+                new JsonSerializerOptions { WriteIndented = true });
+
+            var payloadDict = jwt.Claims.GroupBy(c => c.Type)
+                .ToDictionary(g => g.Key, g => g.Count() == 1
+                    ? (object)g.First().Value
+                    : g.Select(x => x.Value).ToList());
+            decodedPayload = JsonSerializer.Serialize(payloadDict, new JsonSerializerOptions { WriteIndented = true });
+
+            var parts = decodeToken.Trim().Split('.');
+            decodedSignature = parts.Length == 3 ? parts[2] : "N/A";
+            isExpired = jwt.ValidTo < DateTime.UtcNow;
+
+            if (!string.IsNullOrWhiteSpace(decodeSecretKey))
+            {
+                try
+                {
+                    var vp = new TokenValidationParameters
+                    {
+                        ValidateIssuerSigningKey = true,
+                        IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(decodeSecretKey)),
+                        ValidateIssuer = false, ValidateAudience = false, ValidateLifetime = false
+                    };
+                    handler.ValidateToken(decodeToken.Trim(), vp, out _);
+                    isVerified = true; verificationStatus = "valid";
+                }
+                catch { isVerified = false; verificationStatus = "invalid"; }
+            }
+        }
+        catch (Exception ex) { decodeError = $"Failed to decode: {ex.Message}"; }
+    }
+}
